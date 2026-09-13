@@ -1,0 +1,11 @@
+# Store every text file in the repository with LF endings, so clones on Linux
+# and macOS get scripts they can actually execute, whatever the checkout
+# platform. Windows-only scripts are the exception.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Never rewrite these.
+*.tgz binary
+*.png binary

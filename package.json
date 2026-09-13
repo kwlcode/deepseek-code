@@ -1,0 +1,51 @@
+{
+  "name": "deepseek-code",
+  "version": "0.1.0",
+  "description": "A Claude Code-style agentic coding CLI in your terminal, backed by DeepSeek (deepseek-flash / deepseek-v4-pro).",
+  "type": "module",
+  "license": "MIT",
+  "author": "Sakhile (https://github.com/kwlcode)",
+  "homepage": "https://github.com/kwlcode/deepseek-code#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kwlcode/deepseek-code.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kwlcode/deepseek-code/issues"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "bin": {
+    "deepseek-code": "./bin/deepseek-code.js",
+    "dsc": "./bin/deepseek-code.js"
+  },
+  "main": "./src/agent.js",
+  "scripts": {
+    "start": "node ./bin/deepseek-code.js",
+    "doctor": "node ./bin/deepseek-code.js doctor",
+    "test": "node scripts/test.mjs",
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "dependencies": {},
+  "keywords": [
+    "deepseek",
+    "cli",
+    "agent",
+    "coding-agent",
+    "claude-code"
+  ]
+}
