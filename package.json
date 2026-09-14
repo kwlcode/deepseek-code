@@ -1,6 +1,6 @@
 {
   "name": "deepseek-code",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A Claude Code-style agentic coding CLI in your terminal, backed by DeepSeek (deepseek-flash / deepseek-v4-pro).",
   "type": "module",
   "license": "MIT",

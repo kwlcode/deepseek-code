@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-09-13
+
+### Added
+
+- GitHub Actions. `ci.yml` runs the suite on Linux, Windows and macOS across
+  Node 18, 20, 22 and 24; `release.yml` runs on `v*` tags, packs the installable
+  tarball and attaches it to a GitHub release — and publishes to npm when a
+  repository secret named `NPM_TOKEN` is configured.
+- `scripts/install.ps1` and `scripts/install.sh` install the newest release
+  tarball without cloning anything first.
+- `.gitattributes` keeps text files LF in the repository, so shell scripts stay
+  executable on Unix whatever the checkout platform.
+
 ## [0.1.0] - 2026-09-13
 
 First release.
@@ -43,4 +56,5 @@ First release.
 - `--json` / `-p` runs keep stdout free of notices and warnings (they now go to
   stderr), so machine-readable output stays parseable.
 
+[0.1.1]: https://github.com/kwlcode/deepseek-code/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kwlcode/deepseek-code/releases/tag/v0.1.0
