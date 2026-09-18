@@ -36,6 +36,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt, and a peer-driven turn is refused `Write`/`Edit` on settings and config
   files.
 
+### Fixed
+
+- `scripts/install.sh` is executable in the repository again, so the documented
+  `./scripts/install.sh <tarball>` works on macOS and Linux. It had been
+  committed without the bit, which a Windows checkout can neither set nor
+  report — the README's own instruction was failing with "Permission denied".
+
 ## [0.1.1] - 2026-09-13
 
 ### Added
