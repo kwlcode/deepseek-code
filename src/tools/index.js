@@ -11,6 +11,7 @@ import { grepTool } from './search.js';
 import { bashTool, powershellTool } from './shell.js';
 import { todoTool, webFetchTool } from './misc.js';
 import { taskTool } from './task.js';
+import { listAgentsTool, sendMessageTool } from './agents.js';
 
 /** Every tool the CLI can offer. */
 export function allTools() {
@@ -23,7 +24,7 @@ export function allTools() {
     bashTool,
   ];
   if (process.platform === 'win32') tools.push(powershellTool);
-  tools.push(todoTool, webFetchTool, taskTool);
+  tools.push(todoTool, webFetchTool, taskTool, listAgentsTool, sendMessageTool);
   return tools;
 }
 

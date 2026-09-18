@@ -158,6 +158,7 @@ export class TerminalRenderer {
     this.err = options.err ?? process.stderr;
     this.colors = options.colors ?? createColors(shouldUseColor(this.out));
     this.reader = options.reader ?? null;
+    this.screen = options.screen ?? null;
     this.quiet = Boolean(options.quiet);
     this.verbose = Boolean(options.verbose);
     this.spinner = new Spinner(this.out, this.colors);
@@ -165,6 +166,7 @@ export class TerminalRenderer {
   }
 
   write(text) {
+    if (this.screen) return this.screen.writeBody(text);
     this.out.write(text);
   }
 
@@ -199,6 +201,7 @@ export class TerminalRenderer {
 
   startAssistant() {
     this.state = { reasoning: false, text: false, streaming: true };
+    if (this.screen) return;
     this.spinner.start('thinking');
   }
 

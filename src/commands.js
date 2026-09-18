@@ -29,6 +29,7 @@ export const BUILTIN_HELP = [
   ['/model [name]', 'Show or switch the model'],
   ['/mode [mode]', 'Show or switch the permission mode'],
   ['/compact', 'Summarise the conversation to free context'],
+  ['/rename [name]', 'Show or change this session\u2019s name (the @name others address)'],
   ['/clear', 'Start a fresh conversation'],
   ['/resume', 'List and resume an earlier session in this directory'],
   ['/exit', 'Quit (also Ctrl+D)'],

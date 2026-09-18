@@ -14,6 +14,48 @@ import { parseFrontMatter } from '../frontmatter.js';
 
 const AGENT_DIRECTORIES = ['.claude/agents', '.deepseek-code/agents'];
 
+/** Every subagent definition reachable from cwd, project dirs first. */
+export async function listAgentDefinitions(cwd) {
+  const directories = [
+    ...AGENT_DIRECTORIES.map((dir) => path.join(cwd, dir)),
+    path.join(os.homedir(), '.claude', 'agents'),
+    path.join(os.homedir(), '.deepseek-code', 'agents'),
+  ];
+  const seen = new Set();
+  const found = [];
+  for (const directory of directories) {
+    let entries;
+    try {
+      entries = await fsp.readdir(directory);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.md')) continue;
+      const name = entry.replace(/\.md$/, '');
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const file = path.join(directory, entry);
+      try {
+        const raw = await fsp.readFile(file, 'utf8');
+        const { data, body } = parseFrontMatter(raw);
+        found.push({
+          file,
+          name,
+          title: data.name ?? name,
+          description: data.description ?? '',
+          tools: Array.isArray(data.tools) ? data.tools : null,
+          model: typeof data.model === 'string' ? data.model : null,
+          systemPrompt: body.trim(),
+        });
+      } catch {
+        /* skip unreadable definition */
+      }
+    }
+  }
+  return found;
+}
+
 /** Look up a subagent definition by type, e.g. "code-reviewer". */
 export async function loadAgentDefinition(cwd, type) {
   if (!type) return null;

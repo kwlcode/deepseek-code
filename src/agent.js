@@ -18,9 +18,13 @@ import { PermissionEngine, previewFor, describeCall } from './permissions.js';
 import { buildSystemPrompt, loadMemoryFiles } from './prompt.js';
 import { saveSession, createSession } from './session.js';
 import { UsageTracker } from './cost.js';
+import { formatPeerMessage, peerAuthorityBlock } from './inbox.js';
 
 const MAX_CONTINUATIONS = 3;
 const MAX_TOOL_RESULT_CHARS = 60_000;
+
+// Tools a subagent or message target must not carry, or it could recurse forever.
+const NON_RECURSIVE_TOOLS = new Set(['Task', 'SendMessage', 'ListAgents']);
 
 /**
  * Parse tool arguments. Models occasionally wrap JSON in a fence or leave a
@@ -77,6 +81,11 @@ export class Agent {
     this.customPrompt = options.customPrompt ?? null;
     this.allowedTools = options.allowedTools ?? null;
     this.memoryFiles = options.memoryFiles ?? loadMemoryFiles(this.cwd);
+    // Inbound messages waiting to be read; null when this agent takes none.
+    this.inbox = options.inbox ?? null;
+    // True while the current turn is driven by a peer message. A peer can
+    // hand over work but never authority, so it gains no user-level powers.
+    this.peerTurn = false;
 
     this.registry = options.registry
       ? restrictRegistry(options.registry, this.allowedTools)
@@ -185,6 +194,12 @@ export class Agent {
       };
     }
 
+    const blocked = this.peerTurn ? peerAuthorityBlock(name, input, this.cwd) : null;
+    if (blocked) {
+      this.renderer.toolEnd?.({ name, output: blocked, isError: true, denied: true });
+      return { content: `Error: ${blocked}.`, isError: true, denied: true };
+    }
+
     this.renderer.toolStart?.({ name, summary: describeCall(name, input), step });
 
     const decision = await this.permissions.request(tool, input);
@@ -223,8 +238,9 @@ export class Agent {
    * Run one user turn to completion.
    * @returns {Promise<{text: string, steps: number, stopped: string|null, aborted?: boolean, error?: string}>}
    */
-  async runTurn(userText) {
+  async runTurn(userText, { origin = 'user' } = {}) {
     this.abortController = new AbortController();
+    this.peerTurn = origin === 'peer';
     this.session.messages.push({ role: 'user', content: userText });
     const startStep = this.stepCount;
     let finalText = '';
@@ -294,6 +310,11 @@ export class Agent {
           content: outcome.content,
         });
       }
+
+      // Between tool calls is the only safe point to read an inbound message:
+      // nothing is running, so a message can never interrupt a tool. Reading it
+      // here means the next model call already sees it.
+      await this.drainInbox();
       await this.persist();
     }
 
@@ -333,7 +354,7 @@ export class Agent {
     });
 
     const childRegistry = new Map(this.registry);
-    childRegistry.delete('Task');
+    for (const name of NON_RECURSIVE_TOOLS) childRegistry.delete(name);
 
     const systemPrompt = resolved?.systemPrompt
       ? `${resolved.systemPrompt}\n\n# Environment\n\nYou are a subagent started by deepseek-code. Your working directory is ${this.cwd}. Finish by reporting your findings or results in your final message: it is the only thing the calling agent will see.`
@@ -355,6 +376,71 @@ export class Agent {
     const text = outcome.text || lastAssistantText(childSession);
     this.renderer.notice?.(`Subagent "${description ?? 'task'}" finished (${outcome.steps} step(s)).`);
     return { text, steps: outcome.steps, error: outcome.error ?? null };
+  }
+
+  /**
+   * Fold the next queued inbound message into the live conversation. Called
+   * between tool calls, and by the REPL whenever the session is idle — never
+   * while a tool is running, so a message can never interrupt one.
+   */
+  async drainInbox() {
+    if (!this.inbox) return null;
+    if (!(await this.approveHeldMessages())) return null;
+    const entry = this.inbox.next();
+    if (!entry) return null;
+    this.injectPeerMessage(entry);
+    return entry;
+  }
+
+  /**
+   * Ask the user about one message waiting for approval. Only ever called at a
+   * safe point, so the prompt can never land while a tool is running.
+   */
+  async approveHeldMessages() {
+    const held = this.inbox.nextHeld?.();
+    if (!held) return true;
+    const allow =
+      typeof this.inbox.onHold === 'function' ? Boolean(await this.inbox.onHold(held)) : false;
+    this.inbox.resolve(held.id, allow);
+    if (!allow) this.renderer.notice?.('Refused an incoming message from @' + (held.from ?? 'unknown'));
+    return allow;
+  }
+
+  /**
+   * Put an inbound message into the conversation, labelled as coming from a peer
+   * rather than the user. That label is what keeps it from carrying user
+   * authority: it can never answer a permission prompt or change configuration.
+   */
+  injectPeerMessage(entry) {
+    this.peerTurn = true;
+    this.session.messages.push({ role: 'user', content: formatPeerMessage(entry) });
+    this.announceMessage(entry);
+  }
+
+  /**
+   * Pop the next queued message for a session that is idle. The caller runs the
+   * returned text as a fresh turn, so nothing is written to the transcript here.
+   */
+  async readQueuedMessage() {
+    if (!this.inbox) return null;
+    if (!(await this.approveHeldMessages())) return null;
+    const entry = this.inbox.next();
+    if (!entry) return null;
+    this.announceMessage(entry);
+    return { entry, text: formatPeerMessage(entry) };
+  }
+
+  /** Tell the user a message landed, without acting on it. */
+  announceMessage(entry) {
+    const queued = this.inbox?.size ?? 0;
+    this.renderer.notice?.(
+      'Incoming message from @' + (entry.from ?? 'unknown') + (queued ? ' (' + queued + ' more queued)' : ''),
+    );
+  }
+
+  /** How many inbound messages are waiting to be read. */
+  pendingMessages() {
+    return this.inbox?.size ?? 0;
   }
 
   /**

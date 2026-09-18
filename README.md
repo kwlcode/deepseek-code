@@ -180,6 +180,7 @@ safe to pipe.
 | Option | Meaning |
 | --- | --- |
 | `-m, --model <name>` | model to use (default `deepseek-flash`) |
+| `--name <name>` | name this session answers to as `@name` (default: a generated pair like `calm-otter`) |
 | `--effort <low\|medium\|high>` | reasoning effort while thinking is on |
 | `--no-thinking` | disable thinking mode for this run |
 | `--permission-mode <mode>` | `plan`, `default`, `acceptEdits`, `bypassPermissions` |
@@ -216,6 +217,51 @@ in JavaScript, so no `ripgrep`/`rg` binary is required.
 | `TodoWrite` | `todos: [{content, status, activeForm}]` | the plan the agent shows you |
 | `WebFetch` | `url`, `prompt` | fetches a page and renders it as text |
 | `Task` | `description`, `prompt`, `subagent_type` | subagent definition from `.claude/agents/<type>.md`, `general-purpose` by default |
+| `ListAgents` | — | discovers reachable subagents (`.claude/agents`) and live sessions, with the `@name` to address them |
+| `SendMessage` | `name`, `text` | delivers plain text to one agent by `@name`; subagents answer inline, sessions acknowledge and read it between tool calls |
+
+## Agent messaging
+
+Sessions and subagents can be addressed by name and handed work. Discovery is
+files on disk and delivery is a socket — no daemon, no message bus.
+
+| Tier | Target | Delivery | Auth |
+| --- | --- | --- | --- |
+| in-process | subagents | `Task`-style spawn, answers inline | inherits this session's permission mode |
+| same machine | live sessions | direct Unix socket / named pipe | per-session token |
+| other machines | remote sessions | **not implemented** | — |
+
+- **Discovery** — every messaging-capable session writes a registration file
+  (`~/.deepseek-code/registry/<id>.json`) and heartbeats it every 30s. `ListAgents`
+  reads those files, and a session that dies without cleaning up is collected after
+  5 minutes. Two sessions only see each other when they share a filesystem, so a
+  container or WSL2 distro keeps its own registry.
+- **Transport** — each live session listens on its own socket
+  (`~/.deepseek-code/sockets/<id>.sock`, or a named pipe on Windows) whose address is
+  recorded in its registration. `SendMessage` dials the peer directly; nothing is
+  relayed through a server.
+- **Auth** — a per-session token sits in the registration file, which only your user
+  can read, so presenting it proves the caller is you. It is also exported as
+  `CLAUDE_CODE_MESSAGING_TOKEN` alongside `CLAUDE_CODE_MESSAGING_SOCKET`, so a
+  session's own child processes can post back into it.
+- **Naming** — a session is named at startup and renamed with `--name` or `/rename`.
+  Names are lowercase slugs; a taken name becomes `name-2`, and if two live sessions
+  still collide `ListAgents` shows `@name#id`.
+
+Delivery semantics, because a peer is **not the user**:
+
+- an arriving message is queued, never acted on mid-tool: it is read between tool
+  calls, or as a fresh turn when the session is idle;
+- the inbound gate defaults from the receiver's permission class — a
+  `bypassPermissions` session **holds** messages for your approval, while anything
+  lower **accepts** them, since its own prompts still gate the work;
+- a peer message cannot satisfy a permission prompt, and a peer-driven turn is
+  refused `Write`/`Edit` on settings and config files;
+- the queue is capped at 50, bursts are throttled and identical repeats are
+  suppressed, so two sessions cannot bounce a message back and forth forever.
+
+`SendMessage` returns a delivery acknowledgement (`accepted`, `held`, `refused` or
+`duplicate`) rather than an answer; a reply arrives later as an incoming message.
 
 ## Permissions
 
@@ -288,6 +334,7 @@ and `model`; the body expands `$ARGUMENTS`, `$1`–`$9` and `$ARGUMENTS[0]`.
 | `/model [name]` | show or switch the model |
 | `/mode [mode]` | show or switch the permission mode |
 | `/compact` | summarise older turns to free up context |
+| `/rename [name]` | show or change this session's `@name` |
 | `/clear` | start a fresh conversation |
 | `/resume` | pick a saved session for this directory |
 | `/exit`, `/quit` | leave (Ctrl-C twice also works) |
@@ -329,7 +376,7 @@ prompt caching shows a realistic number rather than a guess.
 bin/deepseek-code.js   CLI entry point, flags, REPL, slash commands
 src/agent.js           the agent loop, subagents, compaction
 src/api.js             streaming client for /chat/completions
-src/tools/             fs, search, shell, misc and Task tools
+src/tools/             fs, search, shell, misc, Task and ListAgents/SendMessage tools
 src/permissions.js     rules, matching and the four modes
 src/prompt.js          system prompt and memory files
 src/config.js          settings files, env vars, precedence
@@ -338,6 +385,10 @@ src/commands.js        slash commands and custom .md commands
 src/ui.js              colours, line reader, renderers
 src/diff.js            unified diff for edit previews
 src/cost.js            token accounting and pricing
+src/names.js           session names: generation, normalisation, collisions
+src/registry.js        the on-disk registry of live sessions
+src/transport.js       per-session sockets and the wire protocol
+src/inbox.js           inbound queue, throttling, dedupe and the accept/hold gate
 test/                  node:test suites
   helpers/mock-api.js  stub OpenAI-compatible server
   helpers/fake-tty.mjs runs the CLI with stdin/stdout faking a terminal
@@ -375,6 +426,11 @@ prompts for approval and persists an "always allow" rule.
 - `/compact` uses a second model call, so it costs tokens; automatic compaction
   only kicks in when the context is nearly full.
 - `WebFetch` reads one page at a time and converts HTML to plain text.
+- Cross-machine messaging is not implemented: `ListAgents` only ever shows subagents
+  and sessions on this machine, and there is no relay.
+- The "a peer cannot change configuration" rule is enforced for the `Write` and `Edit`
+  tools by path; a peer-driven turn that shells out through `Bash` is only discouraged
+  by the prompt, so treat incoming messages from untrusted peers accordingly.
 - Rate limits and balance are your account's; `doctor` is the fastest way to
   tell an auth problem from a local one.
 

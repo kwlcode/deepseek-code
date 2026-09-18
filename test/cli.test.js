@@ -319,3 +319,48 @@ test('--resume and -c replay the transcript from an earlier process', async () =
     await api.close();
   }
 });
+
+test('--name names the session and the name is persisted with the transcript', async () => {
+  const api = await startMockApi([{ content: ['PONG'] }]);
+  try {
+    const { dir, home } = await scratch();
+    const run = await runCli(api, {
+      cwd: dir,
+      home,
+      args: ['--json', '--name', 'My Session', '-p', 'reply with PONG'],
+    });
+    assert.equal(run.code, 0, run.report());
+
+    const { session_id: id } = JSON.parse(run.stdout);
+    const projects = path.join(home, '.deepseek-code', 'projects');
+    const [slug] = await fsp.readdir(projects);
+    const transcript = JSON.parse(await fsp.readFile(path.join(projects, slug, `${id}.json`), 'utf8'));
+    assert.equal(transcript.name, 'my-session', 'the name is normalised into an address-safe slug');
+  } finally {
+    await api.close();
+  }
+});
+
+test('the REPL /rename changes the name and cleans its registration up on exit', async () => {
+  const api = await startMockApi([{ content: ['unused'] }]);
+  try {
+    const { dir, home } = await scratch();
+    const run = await runCli(api, {
+      cwd: dir,
+      home,
+      tty: true,
+      args: ['--no-color', '--name', 'first-name'],
+      input: '/rename second-name\n/exit\n',
+    });
+
+    assert.equal(run.timedOut, false, `the REPL never exited.${run.report()}`);
+    assert.equal(run.code, 0, run.report());
+    assert.match(run.out, /@second-name/, 'the rename is confirmed with the new @name');
+
+    const registry = path.join(home, '.deepseek-code', 'registry');
+    assert.deepEqual(await fsp.readdir(registry).catch(() => []), [], 'the registration is removed on exit');
+  } finally {
+    await api.close();
+  }
+});
+

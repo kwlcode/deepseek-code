@@ -4,6 +4,38 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Agent messaging: `ListAgents` and `SendMessage`, so a session can address
+  subagents and other live sessions by `@name` and hand them work. `SendMessage`
+  returns a delivery acknowledgement (`accepted`, `held`, `refused`, `duplicate`)
+  rather than an answer; a reply arrives later as an incoming message.
+- Session naming: a name is generated at startup and can be set with `--name` or
+  `/rename`. Names are lowercase slugs; a taken name becomes `name-2`, and two live
+  sessions that still collide are listed as `@name#id`.
+- Discovery by files, not a daemon: every messaging-capable session writes a
+  registration file under `~/.deepseek-code/registry/` and heartbeats it. Sessions
+  in a different filesystem namespace — a container or WSL2 distro — simply cannot
+  see each other.
+- A per-session socket as the transport: a Unix domain socket, falling back to
+  `/tmp/cc-socks-<uid>/` when the home directory cannot host one, and a named pipe
+  on Windows. One newline-delimited JSON message per connection, authenticated by
+  a per-session token held in the registration file. The token and the socket
+  address are exported as `CLAUDE_CODE_MESSAGING_TOKEN` and
+  `CLAUDE_CODE_MESSAGING_SOCKET` so a session's own child processes can post back
+  into it.
+- Inbound delivery semantics: a message is queued and read between tool calls, or
+  as the next turn when the session is idle, so it never interrupts a running tool.
+  The inbox caps at 50 messages, throttles bursts and suppresses identical repeats,
+  and its accept/hold/refuse gate defaults from the receiver's permission class — a
+  `bypassPermissions` session holds messages for approval, since a lower-trust peer
+  must not be able to drive a higher-trust one.
+- A peer message is explicitly **not the user**: it cannot satisfy a permission
+  prompt, and a peer-driven turn is refused `Write`/`Edit` on settings and config
+  files.
+
 ## [0.1.1] - 2026-09-13
 
 ### Added

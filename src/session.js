@@ -12,6 +12,8 @@ import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
+import { autoName, normalizeName } from './names.js';
+
 export const PROJECTS_DIR = path.join(os.homedir(), '.deepseek-code', 'projects');
 
 /** Filesystem-safe key for a working directory. */
@@ -28,11 +30,12 @@ export function newSessionId() {
   return `${stamp}-${randomBytes(3).toString('hex')}`;
 }
 
-export function createSession({ cwd, model, permissionMode, title }) {
+export function createSession({ cwd, model, permissionMode, title, name }) {
   const now = new Date().toISOString();
   return {
     id: newSessionId(),
     title: title ?? 'untitled session',
+    name: normalizeName(name) ?? autoName(),
     cwd: path.resolve(cwd),
     model,
     permissionMode,
@@ -59,6 +62,7 @@ export async function saveSession(session) {
   const payload = {
     id: session.id,
     title: session.title,
+    name: session.name ?? null,
     cwd: session.cwd,
     model: session.model,
     permissionMode: session.permissionMode,
@@ -91,6 +95,7 @@ export async function listSessions(cwd, limit = 20) {
       sessions.push({
         id: parsed.id ?? entry.replace(/\.json$/, ''),
         title: parsed.title ?? 'untitled session',
+        name: parsed.name ?? null,
         updatedAt: parsed.updatedAt ?? stat.mtime.toISOString(),
         model: parsed.model,
         turns: parsed.usage?.turns ?? 0,

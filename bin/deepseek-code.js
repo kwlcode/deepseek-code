@@ -18,6 +18,11 @@ import { loadMemoryFiles, titleFor } from '../src/prompt.js';
 import { listModels } from '../src/api.js';
 import { findBash } from '../src/tools/shell.js';
 import { createColors, createLineReader, createRenderer, shouldUseColor } from '../src/ui.js';
+import { Screen, InputBox } from '../src/terminal.js';
+import { registerSession, touchSession, unregisterSession, generateToken, claimName } from '../src/registry.js';
+import { autoName, normalizeName } from '../src/names.js';
+import { createMessageServer, socketAddressFor } from '../src/transport.js';
+import { createInbox } from '../src/inbox.js';
 import { formatCost } from '../src/cost.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -37,6 +42,7 @@ const STRING_FLAGS = new Map([
   ['--effort', 'effort'],
   ['--output-format', 'outputFormat'],
   ['--cwd', 'cwd'],
+  ['--name', 'name'],
 ]);
 
 const BOOLEAN_FLAGS = new Map([
@@ -123,6 +129,7 @@ Usage
 
 Options
   -m, --model <name>              model to use (default: deepseek-flash)
+      --name <name>               name this session answers to as @name
       --effort <low|medium|high>  reasoning effort when thinking is on
       --no-thinking               disable thinking mode
       --permission-mode <mode>    ${permissionModes().join(' | ')}
@@ -237,7 +244,7 @@ async function resolveResumeSession(config, flags) {
 }
 
 /** Build an agent sharing this session's registry, renderer and permission mode. */
-function buildAgent({ config, registry, renderer, interactive, session, allowedTools }) {
+function buildAgent({ config, registry, renderer, interactive, session, allowedTools, inbox }) {
   return new Agent({
     config,
     registry,
@@ -245,6 +252,7 @@ function buildAgent({ config, registry, renderer, interactive, session, allowedT
     interactive,
     session,
     allowedTools,
+    inbox,
     permissionMode: config.permissionMode,
     memoryFiles: loadMemoryFiles(config.cwd),
     customPrompt: config.appendSystemPrompt ?? null,
@@ -421,12 +429,28 @@ export async function handleSlashCommand(line, ctx) {
         cwd: config.cwd,
         model: agent.session.model ?? config.model,
         permissionMode: agent.permissions.mode,
+        name: agent.session.name,
       }));
       renderer.write('Started a fresh conversation.\n');
       return { action: 'handled' };
 
     case 'resume':
       return { action: 'resume' };
+
+    case 'rename': {
+      const next = normalizeName(args);
+      if (!next) {
+        renderer.error('usage: /rename <name>  (letters, digits, "-", "_", "."; max 32)');
+        return { action: 'handled' };
+      }
+      const claimed = await claimName(next, { excludeIds: [agent.session.id] });
+      const taken = claimed !== next;
+      agent.session.name = claimed;
+      await agent.persist();
+      await ctx.refreshRegistration?.(agent.session);
+      renderer.write('session name: @' + claimed + (taken ? '  ("' + next + '" was taken)' : '') + '\n');
+      return { action: 'handled' };
+    }
 
     case 'exit':
     case 'quit':
@@ -516,14 +540,14 @@ function releaseStdin() {
 
 /** The interactive REPL. */
 async function runRepl(ctx, seedPrompt) {
-  const { renderer, reader } = ctx;
+  const { renderer, screen } = ctx;
   const colors = renderer.colors ?? createColors(false);
-  printBanner(ctx);
-
+  const config = ctx.config;
   const pending = seedPrompt ? [seedPrompt] : [];
   let interruptArmed = false;
+  let box = null;
 
-  const onSigint = () => {
+  const interrupt = () => {
     if (ctx.busy) {
       renderer.write('\n');
       renderer.warn('interrupting the current turn...');
@@ -538,6 +562,80 @@ async function runRepl(ctx, seedPrompt) {
     renderer.write('\n');
     renderer.notice('Press Ctrl+C again to exit, or use /exit.');
   };
+
+  if (screen) {
+    box = new InputBox({
+      input: process.stdin,
+      screen,
+      onInterrupt: interrupt,
+      onEof: () => {},
+    });
+    ctx.reader = box;
+    renderer.reader = box;
+    ctx.box = box;
+  }
+
+  const refreshStatus = () => {
+    if (!screen) return;
+    const model = ctx.agent.session.model ?? config.model;
+    screen.setStatus(`${model} \u00b7 ${ctx.agent.permissions.mode} \u00b7 ${formatCost(ctx.agent.tracker.usd)}`);
+  };
+
+  printBanner(ctx);
+  refreshStatus();
+
+  const heartbeat = setInterval(() => touchSession(ctx.agent.session.id).catch(() => {}), 30_000);
+  heartbeat.unref?.();
+
+  ctx.inbox.onHold = async (entry) => {
+    const decision = await renderer.askPermission({
+      summary: 'incoming message from @' + (entry.from ?? 'unknown'),
+      tool: 'SendMessage',
+      detail: { from: entry.from, message: entry.text },
+      preview: entry.text,
+      mode: ctx.agent.permissions.mode,
+    });
+    return decision === 'allow' || decision === 'allow-always';
+  };
+
+  let messageServer = null;
+  const startTransport = async (session) => {
+    if (messageServer) await messageServer.stop().catch(() => {});
+    const server = createMessageServer({
+      address: socketAddressFor(session.id),
+      token: session.token,
+      handler: async (request) => {
+        const outcome = ctx.inbox.submit({
+          id: request.id,
+          from: request.from,
+          text: request.text,
+          reply_to: request.reply_to,
+        });
+        if (outcome.disposition === 'refused') {
+          return { ok: false, disposition: 'refused', id: outcome.id, error: outcome.reason };
+        }
+        return { ok: true, disposition: outcome.disposition, id: outcome.id };
+      },
+    });
+    const actual = await server.start();
+    messageServer = server;
+    process.env.CLAUDE_CODE_MESSAGING_SOCKET = actual;
+    if (actual !== socketAddressFor(session.id)) registerSession(session, { socket: actual, token: session.token }).catch(() => {});
+  };
+  try {
+    await startTransport(ctx.agent.session);
+  } catch (error) {
+    renderer.warn('could not start the message socket: ' + error.message);
+  }
+  ctx.onSessionSwap.push((session) => {
+    startTransport(session).catch((error) => renderer.warn('could not restart the message socket: ' + error.message));
+  });
+  ctx.refreshRegistration = (session) => {
+    const address = messageServer ? messageServer.boundAddress : socketAddressFor(session.id);
+    return registerSession(session, { socket: address, token: session.token }).catch(() => {});
+  };
+
+  const onSigint = () => interrupt();
   process.on('SIGINT', onSigint);
 
   try {
@@ -547,13 +645,38 @@ async function runRepl(ctx, seedPrompt) {
         line = pending.shift();
         renderer.write(`${colors.cyan('> ')}${line}\n`);
       } else {
-        renderer.write(`${colors.cyan('> ')}`);
-        const answer = await reader.next();
+        if (!box) renderer.write(`${colors.cyan('> ')}`);
+        // Wait for the user or for an inbound message, whichever comes first.
+        const raced = await Promise.race([
+          ctx.reader.next().then((value) => ({ answer: value })),
+          ctx.inbox.waitForWork().then(() => ({ work: true })),
+        ]);
+        if (raced.work) {
+          const message = await ctx.agent.readQueuedMessage();
+          if (message) {
+            ctx.busy = true;
+            if (screen) screen.startThinking();
+            try {
+              const outcome = await ctx.agent.runTurn(message.text, { origin: 'peer' });
+              if (outcome.error) renderer.error(outcome.error);
+            } catch (error) {
+              renderer.error(error.message);
+            } finally {
+              ctx.busy = false;
+              if (screen) screen.stopThinking();
+              ctx.agent.renderer.endAssistant?.({});
+              refreshStatus();
+            }
+          }
+          continue;
+        }
+        const answer = raced.answer;
         if (answer.done) {
-          renderer.write('\n');
+          if (!box) renderer.write('\n');
           break;
         }
         line = answer.value;
+        if (box) renderer.write(`${colors.cyan('> ')}${line}\n`);
       }
 
       const trimmed = String(line ?? '').trim();
@@ -584,6 +707,7 @@ async function runRepl(ctx, seedPrompt) {
       }
 
       ctx.busy = true;
+      if (screen) screen.startThinking();
       try {
         const outcome = await ctx.agent.runTurn(promptText);
         if (outcome.error) renderer.error(outcome.error);
@@ -591,7 +715,9 @@ async function runRepl(ctx, seedPrompt) {
         renderer.error(error.message);
       } finally {
         ctx.busy = false;
+        if (screen) screen.stopThinking();
         ctx.agent.renderer.endAssistant?.({});
+        refreshStatus();
       }
     }
   } finally {
@@ -599,6 +725,11 @@ async function runRepl(ctx, seedPrompt) {
     renderer.spinner?.stop();
   }
   renderer.write(`${colors.dim(`\nSession saved: ${ctx.agent.session.file ?? '(unsaved)'}`)}\n`);
+  if (screen) screen.dispose();
+  if (box) box.dispose();
+  clearInterval(heartbeat);
+  if (messageServer) await messageServer.stop().catch(() => {});
+  unregisterSession(ctx.agent.session.id).catch(() => {});
   return 0;
 }
 
@@ -692,12 +823,16 @@ export async function main() {
 
   // Only the REPL needs a line reader. In one-shot mode attaching a flowing
   // listener to stdin would keep the process alive after the answer is printed.
-  const reader = interactive ? createLineReader(process.stdin) : null;
+  const colors = createColors(shouldUseColor(process.stdout) && !flags.noColor);
+  const useRaw = interactive && typeof process.stdin.setRawMode === 'function';
+  const screen = useRaw ? new Screen(process.stdout, { colors }) : null;
+  const reader = interactive && !screen ? createLineReader(process.stdin) : null;
   const renderer = createRenderer({
     reader,
+    screen,
     verbose: Boolean(flags.verbose),
     quiet: !interactive,
-    colors: createColors(shouldUseColor(process.stdout) && !flags.noColor),
+    colors,
   });
 
   const resumed = await resolveResumeSession(config, flags);
@@ -706,10 +841,17 @@ export async function main() {
     model: config.model,
     permissionMode: config.permissionMode,
     title: titleFor(promptText || 'untitled session'),
+    name: flags.name,
   });
   if (resumed) {
     renderer.notice(`Resumed session ${resumed.id} (${resumed.messages?.length ?? 0} messages, ${resumed.model ?? config.model}).`);
   }
+
+  // One inbox per process: it outlives individual sessions, and the inbound gate
+  // reads the live permission mode each time a message arrives.
+  const inbox = createInbox({
+    permissionMode: () => ctx.agent?.permissions.mode ?? config.permissionMode,
+  });
 
   const ctx = {
     config,
@@ -717,10 +859,14 @@ export async function main() {
     renderer,
     reader,
     commands: await loadCommands(config.cwd),
+    screen,
     allowedTools,
+    inbox,
+    onSessionSwap: [],
     busy: false,
     agent: null,
     replaceSession(newSession) {
+      const previousId = ctx.agent?.session?.id;
       ctx.agent = buildAgent({
         config,
         registry,
@@ -728,8 +874,21 @@ export async function main() {
         interactive,
         session: newSession,
         allowedTools,
+        inbox,
       });
       ctx.agent.setPermissionMode(normalizePermissionMode(newSession.permissionMode) ?? config.permissionMode);
+      if (interactive) {
+        newSession.token = newSession.token ?? generateToken();
+        process.env.CLAUDE_CODE_MESSAGING_TOKEN = newSession.token;
+        (async () => {
+          if (previousId && previousId !== newSession.id) await unregisterSession(previousId);
+          newSession.name = await claimName(normalizeName(newSession.name) ?? autoName(), {
+            excludeIds: [newSession.id, previousId],
+          });
+          await registerSession(newSession, { socket: socketAddressFor(newSession.id), token: newSession.token });
+        })().catch(() => {});
+      }
+      for (const callback of ctx.onSessionSwap) callback(newSession);
     },
   };
   ctx.replaceSession(session);
